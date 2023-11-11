@@ -133,75 +133,96 @@ Returns the wrapped body as a string."
         (display-warning
          'ob-racket
          ":var is only supported when :lang starts with `racket', `plai' or `lazy'")))
-  (mapconcat #'identity
-             (append
-              (list (format "#lang %s\n" lang-line))
-              (when prologue (list (ob-racket--expand-fmt pro)))
-              var-defs
-              (list body)
-              (when epilogue (list (ob-racket--expand-fmt epi))))
-             "\n")))
+    (mapconcat #'identity
+               (append
+		(list (format "#lang %s\n" lang-line))
+		(when prologue (list (ob-racket--expand-fmt pro)))
+		var-defs
+		(list body)
+		(when epilogue (list (ob-racket--expand-fmt epi))))
+               "\n")))
+
+(defvar org-babel-racket-sessions nil
+  "A list to store active Racket sessions.")
+
+(defun org-babel-racket-initiate-session (&optional session)
+  "Initiate a Racket session named SESSION."
+  (unless (string= session "none")
+    (let ((session-buffer (cdr (assoc session org-babel-racket-sessions))))
+      (unless session-buffer
+        (save-window-excursion
+          (racket-repl)  ;; This function should start the Racket REPL
+          (rename-buffer (format "*racket-%s*" session))
+          (setq session-buffer (current-buffer))
+          (add-to-list 'org-babel-racket-sessions (cons session session-buffer))))
+      session-buffer)))
+
+(defun org-babel-racket-send-string (session-buffer body)
+  "Send a string of Racket code BODY to the Racket session SESSION-BUFFER."
+  (with-current-buffer session-buffer
+    (goto-char (point-max))
+    (insert body)
+    (comint-send-input)
+    (comint-wait-for-output)
+    (buffer-substring-no-properties comint-last-input-start comint-last-output-end)))
 
 (defun org-babel-execute:racket (body params)
-  "Evaluate a `racket' code block.  BODY and PARAMS.
+  "Evaluate a `racket' code block.  BODY and PARAMS."
+  (let* ((session (cdr (assoc :session params)))
+         (result-type (cdr (assoc :result-type params)))
+         (lang (alist-get :lang params))
+         (vars (org-babel--get-vars params))
+         (prologue (alist-get :prologue params))
+         (epilogue (alist-get :epilogue params))
+         (cmd (alist-get :cmd params "racket -u"))
+         (ext (alist-get :file-ext params "rkt"))
+         (file (alist-get :file params))
+         (eval-file (alist-get :eval-file params))
+         (session-buffer (org-babel-racket-initiate-session session))
+         x-body
+         result)
 
-Some custom header arguments are supported to control the
-evaluation.  These are:
+    ;; Prepare the body with language, variables, prologue, and epilogue
+    (setq x-body (if (or lang vars prologue epilogue)
+                     (ob-racket--wrap-body body lang vars prologue epilogue)
+                   body))
 
-- :lang which adds rackets `#lang :lang' to BODY allowing the
-  code to take a :prologue, :epilogue and :var.  :var is
-  supported only if `:lang' starts with `racket', `plai' or
-  `lazy'.
+    ;; Debug option
+    (if (cdr (assoc :debug params))
+        (message "Debug: %s" x-body))
 
-- :cmd which allows to set the racket executable and the switches
-  on each code block.
-
-- :debug which outputs the body before passing it to the
-  interpreter.
-
-- :eval-file FILENAME which writes the body to FILENAME and then
-  evaluates the result.  When FILENAME is equal to \"\" it is
-  derived from the code-block name."
-  (let ((lang      (alist-get :lang params))
-        (vars      (org-babel--get-vars params))
-        (prologue  (alist-get :prologue params))
-        (epilogue  (alist-get :epilogue params))
-        (cmd       (alist-get :cmd params "racket -u"))
-        (ext       (alist-get :file-ext params "rkt"))
-        (file      (alist-get :file params))
-        (eval-file (alist-get :eval-file params))
-        x-body)
-
+    ;; Handle :eval-file
     (when (eq "" eval-file)
       (setq eval-file (alist-get :file
                                  (org-babel-generate-file-param
                                   (nth 4 (org-babel-get-src-block-info))
                                   (cons (cons :file-ext ext) params)))))
 
-    (setq x-body (if (or lang vars prologue epilogue)
-                     (ob-racket--wrap-body body lang vars prologue epilogue)
-                   body))
-
-    (if (assq :debug params)
-        x-body
+    ;; Execute the code block
+    (if session
+        ;; For session-based execution
+        (setq result (org-babel-racket-send-string session-buffer x-body))
+      ;; For non-session execution
       (if file
           (with-temp-file file (insert x-body))
-        (let* ((temp (or eval-file
-                         (org-babel-temp-file "ob-" (concat "." ext))))
-               (result (progn (with-temp-file temp (insert x-body))
-                              (org-babel-eval (concat cmd " " temp) ""))))
-          (org-babel-reassemble-table
-           (org-babel-result-cond (alist-get :result-params params)
-             result
-             (ob-racket--table-or-string result))
-           (org-babel-pick-name (alist-get :colname-names params)
-                                (alist-get :colnames params))
-           (org-babel-pick-name (alist-get :rowname-names params)
-                                (alist-get :rownames params))))))))
+        (let ((temp (or eval-file (org-babel-temp-file "ob-" (concat "." ext)))))
+          (with-temp-file temp (insert x-body))
+          (setq result (org-babel-eval (concat cmd " " temp) "")))))
+
+    ;; Process the result
+    (org-babel-reassemble-table
+     (org-babel-result-cond (alist-get :result-params params)
+       result
+       (ob-racket--table-or-string result))
+     (org-babel-pick-name (alist-get :colname-names params)
+                          (alist-get :colnames params))
+     (org-babel-pick-name (alist-get :rowname-names params)
+                          (alist-get :rownames params)))))
+
 
 (defun org-babel-prep-session:racket (session params)
-  "Not implemented.  SESSION and PARAMS are discarded."
-  (error "`racket` presently does not support sessions"))
+  "Prepare SESSION according to PARAMS."
+  (org-babel-racket-initiate-session session))
 
 (provide 'ob-racket)
 
